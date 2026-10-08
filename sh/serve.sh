@@ -16,6 +16,15 @@
 #   --idle-timeout 1800     空闲 30 分钟自动退出并释放显存
 #   --model vit_h           指定模型（默认自动选用本机权重）
 #   --warmup                启动时预热一张图（首帧更快）
+#
+# TensorRT engine 预加载（可选，需先 sh/build_engine.sh 构建 engine）：
+#   --engine models/sam_vit_h_encoder_tf32.engine   直接指定 engine 文件
+#   --precision tf32                                按模型+精度自动推断 engine 路径
+#
+#   示例（常驻 tf32 engine，之后 ./sh/run.sh 请求最快）：
+#     ./sh/serve.sh start --model vit_h --precision tf32 --warmup
+#     ./sh/serve.sh start --engine models/sam_vit_h_encoder_tf32.engine
+#   （不指定 --engine/--precision 时仍加载 PyTorch 权重 .pth）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,9 +42,12 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   exit 1
 fi
 
-# 与 run.sh 保持一致的环境变量
-export LD_LIBRARY_PATH="$SP/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
+# 与 run.sh / run_trt.sh 保持一致的环境变量
+# （含 /usr/lib/aarch64-linux-gnu，供 TensorRT Python 绑定加载 libnvinfer.so）
+export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu:$SP/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
+# 注意：不要设 NVIDIA_TF32_OVERRIDE。TensorRT engine 要求构建与执行时该值一致
+# （build_engine.sh 未设置），sam_server.py 也会主动清除它。
 
 mkdir -p "$RUN_DIR"
 

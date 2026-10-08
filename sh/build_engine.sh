@@ -2,11 +2,21 @@
 # 用 trtexec 把 SAM 图像编码器 ONNX 构建成 TensorRT engine
 #
 # 用法:
-#   ./sh/build_engine.sh <onnx文件>              # 默认 FP16
-#   ./sh/build_engine.sh <onnx文件> fp32         # FP32
+#   ./sh/build_engine.sh <onnx文件>              # 默认 fp16
+#   ./sh/build_engine.sh <onnx文件> tf32         # TF32（Ampere+ 默认精度，精度高、速度快）
+#   ./sh/build_engine.sh <onnx文件> fp32         # 纯 FP32（禁用 TF32，最精确、最慢）
+#   ./sh/build_engine.sh <onnx文件> fp16         # FP16（最快、内存最小）
+#   ./sh/build_engine.sh <onnx文件> <精度> [额外 trtexec 参数...]
 #
 # 输出:
 #   <同名>_<精度>.engine    与 onnx 同目录（默认在 models/）
+#
+# 三档精度的实现差异（TensorRT 语义）:
+#   - TF32 是 FP32 的一种「加速模式」，默认就开启，不是独立开关：
+#       tf32 -> 不加任何精度 flag（既不加 --fp16，也不加 --noTF32）
+#               卷积 / matmul 用 TF32 计算，权重仍为 FP32 存储 → 精度接近 FP32、速度接近 FP16
+#       fp32 -> 加 --noTF32（显式禁用 TF32，纯 FP32 计算，最精确但最慢）
+#       fp16 -> 加 --fp16（权重与计算 FP16，最快、显存占用最小，精度略降）
 #
 # 说明:
 #   - 构建只做一次，之后推理直接加载 .engine（几秒即可）
@@ -35,8 +45,8 @@ if [ -z "${TRTEXEC:-}" ] || [ ! -x "$TRTEXEC" ]; then
 fi
 
 if [ -z "$ONNX" ]; then
-  echo "[错误] 用法: ./sh/build_engine.sh <onnx文件> [fp32|fp16] [额外 trtexec 参数]"
-  echo "  例: ./sh/build_engine.sh models/sam_vit_h_encoder.onnx fp16"
+  echo "[错误] 用法: ./sh/build_engine.sh <onnx文件> [fp16|tf32|fp32] [额外 trtexec 参数]"
+  echo "  例: ./sh/build_engine.sh models/sam_vit_h_encoder.onnx tf32"
   exit 1
 fi
 
@@ -64,11 +74,18 @@ echo ""
 echo "[提示] 构建过程可能耗时数分钟（TensorRT 会为每层做 kernel 自动调优）"
 echo ""
 
+# 精度 -> trtexec flag 映射
+#   tf32 : 不传任何精度 flag（TF32 是 fp32 的默认加速模式，本来就开着）
+#   fp32 : --noTF32 显式关闭 TF32，得到纯 fp32
+#   fp16 : --fp16 启用半精度
 case "$PRECISION" in
-  fp16|FP16) PREC_FLAG="--fp16" ;;
-  fp32|FP32) PREC_FLAG="" ;;
-  *) echo "[错误] 未知精度: $PRECISION (可选 fp16 / fp32)"; exit 1 ;;
+  fp16|FP16) PREC_FLAG="--fp16"; PREC_DESC="FP16（最快，精度略降）" ;;
+  tf32|TF32) PREC_FLAG="";       PREC_DESC="TF32（默认：FP32 精度 + Ampere 张量核加速）" ;;
+  fp32|FP32) PREC_FLAG="--noTF32"; PREC_DESC="FP32（关闭 TF32，最精确、最慢）" ;;
+  *) echo "[错误] 未知精度: $PRECISION (可选 fp16 / tf32 / fp32)"; exit 1 ;;
 esac
+echo " 精度说明 : $PREC_DESC"
+echo ""
 
 START=$(date +%s)
 echo " 开始构建 ..."

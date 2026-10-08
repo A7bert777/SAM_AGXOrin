@@ -38,9 +38,25 @@ import sam_infer as S
 from trt_runner import TRTEngine
 
 
-def default_engine(model: str) -> Path:
-    """按模型类型给出默认 engine 路径（FP16）。"""
-    return ROOT / "models" / f"sam_{model}_encoder_fp16.engine"
+# 可选的 engine 精度后缀（由 sh/build_engine.sh 的第二个参数决定）
+ENGINE_PRECISIONS = ("tf32", "fp16", "fp32")
+
+
+def default_engine(model: str, precision: str | None = None) -> Path:
+    """给出 engine 路径。
+
+    precision 指定时 -> models/sam_<model>_encoder_<precision>.engine
+    未指定时       -> 按 tf32 > fp16 > fp32 的顺序，返回第一个已存在的 engine。
+    """
+    models = ROOT / "models"
+    if precision:
+        return models / f"sam_{model}_encoder_{precision}.engine"
+    for p in ENGINE_PRECISIONS:
+        cand = models / f"sam_{model}_encoder_{p}.engine"
+        if cand.is_file():
+            return cand
+    # 都没有则返回默认 fp16 路径（后续会报"找不到 engine"）
+    return models / f"sam_{model}_encoder_fp16.engine"
 
 
 def build_predictor_with_trt_encoder(sam, engine):
@@ -93,7 +109,9 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="SAM + TensorRT 推理",
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--image", required=True, help="输入图像")
-    p.add_argument("--engine", default=None, help="TensorRT engine 路径（默认按模型推断）")
+    p.add_argument("--engine", default=None, help="TensorRT engine 路径（默认按模型+精度推断）")
+    p.add_argument("--precision", default=None, choices=list(ENGINE_PRECISIONS),
+                   help="engine 精度（默认自动选用已存在的 engine，优先 tf32）")
     p.add_argument("--model", default=None, choices=list(S.CKPT_MAP), help="SAM 模型类型")
     p.add_argument("--ckpt", default=None, help="SAM 权重（默认按模型推断）")
     p.add_argument("--point", nargs="+", type=float, default=None, metavar="X Y", help="点提示")
@@ -119,11 +137,12 @@ def main(argv=None):
         sys.exit("[错误] 必须提供 --point 或 --box")
 
     args.model = S.resolve_model(args)
-    engine_path = Path(args.engine) if args.engine else default_engine(args.model)
+    engine_path = Path(args.engine) if args.engine else default_engine(args.model, args.precision)
     if not engine_path.is_file():
         sys.exit(f"[错误] 找不到 engine: {engine_path}\n"
                  f"       请先执行: ./venv310/bin/python py/export_onnx.py --model {args.model}\n"
-                 f"                  ./sh/build_engine.sh models/sam_{args.model}_encoder.onnx")
+                 f"                  ./sh/build_engine.sh models/sam_{args.model}_encoder.onnx "
+                 f"[fp16|tf32|fp32]")
 
     ckpt = args.ckpt or str(ROOT / "models" / S.CKPT_MAP[args.model])
     if not Path(ckpt).is_file():
