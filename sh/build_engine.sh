@@ -17,7 +17,14 @@ cd "$(dirname "$0")/.."
 
 ONNX="${1:-}"
 PRECISION="${2:-fp16}"
-shift 2 2>/dev/null || true
+# 按“实际传入的参数个数”位移，不能无条件 shift 2：
+# 当只传 1 个参数时，bash 的 `shift 2` 会失败且不位移，导致 $@ 仍含 ONNX 路径，
+# 被下面的 EXTRA="$*" 当作额外参数追加到 trtexec 末尾，触发 "Unknown option"。
+if [ "$#" -ge 2 ]; then
+  shift 2
+elif [ "$#" -ge 1 ]; then
+  shift 1
+fi
 EXTRA="$*"
 
 TRTEXEC="/usr/src/tensorrt/bin/trtexec"
