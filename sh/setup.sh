@@ -7,7 +7,7 @@
 #   3. 确保 pip 可用
 #   4. 安装 NVIDIA 定制 PyTorch + torchvision（Jetson 专用 wheel）
 #   5. 安装 segment-anything 及其依赖
-#   6. 检查可选的 TensorRT 组件
+#   6. 安装 ONNX 相关组件（onnx 为 ONNX 导出必需；保持 numpy<2）
 #   7. 下载 SAM 权重（默认 ViT-B）
 #
 # 用法：./sh/setup.sh
@@ -221,13 +221,41 @@ else
   fi
 fi
 
-# ---------- 6. 可选加速组件 ----------
-echo "[6/7] 检查可选加速组件 ..."
-for pkg in tensorrt onnx onnxruntime; do
+# ---------- 6. ONNX / TensorRT 组件 ----------
+echo "[6/7] 安装 ONNX 相关组件 ..."
+# torch.onnx.export 依赖 onnx 包，缺失会报 "Module onnx is not installed!"。
+# 关键：必须与 numpy<2 一起装！onnx 默认会把 numpy 升到 2.x，而 NVIDIA 定制
+# torch 是按 NumPy 1.x 编译的，升级后会报
+# "A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x"，
+# 导致 import torch 异常、ONNX 导出结果损坏。
+if "$PY" -c "import onnx" >/dev/null 2>&1; then
+  echo "      onnx: 已安装 ($("$PY" -c 'import onnx; print(onnx.__version__)'))"
+else
+  echo "      安装 onnx（ONNX 导出必需，体积小）..."
+  set +e
+  "$PY" -m pip install --no-cache-dir --progress-bar on "numpy<2" onnx \
+    2>&1 | tee "$LOG/onnx_install.log"
+  onnx_rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$onnx_rc" -ne 0 ]; then
+    echo "      [警告] onnx 安装失败（ONNX 导出将不可用），日志：logs/onnx_install.log"
+  else
+    echo "      onnx: $("$PY" -c 'import onnx; print(onnx.__version__)')"
+  fi
+fi
+
+# 兜底：确认 numpy 仍是 1.x（防止 pip 解析依赖时再次升级）
+if ! "$PY" -c "import numpy; raise SystemExit(0 if numpy.__version__.split('.')[0]=='1' else 1)" >/dev/null 2>&1; then
+  echo "      [警告] numpy 被升级到 2.x，回退到 <2 ..."
+  "$PY" -m pip install --no-cache-dir "numpy<2" >/dev/null 2>&1 || true
+fi
+
+# 可选：tensorrt（JetPack 自带）、onnxruntime（CPU 校验用）
+for pkg in tensorrt onnxruntime; do
   if "$PY" -c "import ${pkg//-/_}" >/dev/null 2>&1; then
     echo "      ${pkg}: 已安装"
   else
-    echo "      ${pkg}: 未安装（可选，如需 TensorRT 加速可后续安装）"
+    echo "      ${pkg}: 未安装（可选）"
   fi
 done
 

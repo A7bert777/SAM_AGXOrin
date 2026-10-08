@@ -48,6 +48,36 @@ class EncoderWrapper(torch.nn.Module):
         return self.enc(image)
 
 
+def _total_model_size(onnx_path: str) -> int:
+    """返回 ONNX 模型的实际总大小（含外部数据文件）。
+
+    vit_l / vit_h 的权重超过 2GB（protobuf 单文件上限），torch.onnx.export 会把
+    权重拆成同目录下的「外部数据文件」，.onnx 本身只含计算图。此函数把 .onnx
+    及其引用的外部数据文件大小一并统计，避免误以为「文件才 1.4MB」。
+    """
+    onnx_path = os.path.abspath(onnx_path)
+    total = os.path.getsize(onnx_path)
+    try:
+        import onnx
+        model = onnx.load(onnx_path, load_external_data=False)
+        data_dir = os.path.dirname(onnx_path)
+        seen = set()
+        for init in model.graph.initializer:
+            for entry in init.external_data:
+                if entry.key == "location":
+                    f = os.path.join(data_dir, entry.value)
+                    if os.path.isfile(f) and f not in seen:
+                        seen.add(f)
+                        total += os.path.getsize(f)
+    except Exception:  # noqa: BLE001
+        import glob
+        for pat in ("enc.*", "onnx__*"):
+            for f in glob.glob(os.path.join(os.path.dirname(onnx_path), pat)):
+                if f != onnx_path:
+                    total += os.path.getsize(f)
+    return total
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="导出 SAM 图像编码器为 ONNX (供 TensorRT 加速)",
@@ -119,14 +149,27 @@ def main(argv=None):
             export_params=True,
         )
     print(f"      导出耗时 : {time.time() - t0:.2f}s")
-    print(f"      文件大小 : {os.path.getsize(out) / 1024**2:.1f} MB")
+
+    # 说明：vit_l / vit_h 的编码器权重超过 2GB（ONNX protobuf 单文件上限为 2GB），
+    #       torch.onnx.export 会自动把权重写成「外部数据文件」（与 .onnx 同目录的
+    #       enc.* / onnx__* 等文件），.onnx 本身只存计算图，因此体积很小。这是正常现象，
+    #       构建 TensorRT engine 时 trtexec 会自动读取这些外部数据文件（请勿删除/移动）。
+    onnx_bytes = _total_model_size(out)
+    print(f"      计算图大小 : {os.path.getsize(out) / 1024**2:.1f} MB")
+    if onnx_bytes > os.path.getsize(out):
+        print(f"      权重外部数据 : {(onnx_bytes - os.path.getsize(out)) / 1024**2:.1f} MB"
+              f"（与 .onnx 同目录，构建 engine 时需一并保留）")
+    print(f"      模型合计   : {onnx_bytes / 1024**2:.1f} MB")
 
     # ---- 3. 校验 ----
     print("\n[3/3] 校验 ONNX ...")
     try:
         import onnx
-        model = onnx.load(out)
-        onnx.checker.check_model(model)
+        # 关键：对大模型必须用「路径」校验 check_model(path)，
+        # 不能 check_model(onnx.load(path))。后者会把外部数据引用当内联数据处理，
+        # 触发 "Failed to serialize proto" 假报错。
+        onnx.checker.check_model(out)
+        model = onnx.load(out, load_external_data=False)
         ins = [(i.name, [d.dim_value for d in i.type.tensor_type.shape.dim])
                for i in model.graph.input]
         outs = [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim])
@@ -136,6 +179,7 @@ def main(argv=None):
         print(f"      输出 : {outs}")
     except ImportError:
         print("      (未安装 onnx，跳过校验)")
+        print("      提示：pip install 'numpy<2' onnx  (numpy 必须 <2，否则 torch 无法工作)")
     except Exception as e:  # noqa: BLE001
         print(f"      [警告] 校验异常: {e}")
 

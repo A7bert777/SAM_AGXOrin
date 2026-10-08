@@ -25,6 +25,10 @@ models/*.onnx
 models/*.engine
 *.pth
 *.engine
+# ONNX 外部数据文件（vit_l / vit_h 权重 >2GB 时由 export_onnx.py 自动生成在 models/）
+models/enc.*
+models/onnx__*
+models/.onnx.data
 
 # ── 运行时产物 ──────────────────────────────────────────
 # 服务运行时文件（socket / pid / 日志）
@@ -38,7 +42,10 @@ logs/*.json
 logs/pp/
 *.log
 
-# 可视化与掩码输出
+# 可视化与掩码输出（含子目录，如 outputimage/b|h|l/）
+outputimage/**/*.png
+outputimage/**/*.jpg
+outputimage/**/*.jpeg
 outputimage/*.png
 outputimage/*.jpg
 outputimage/*.jpeg
