@@ -1,0 +1,24 @@
+# SAM_AGXOrin 依赖清单（Jetson AGX Orin / aarch64 / Python 3.10）
+#
+# 注意：torch / torchvision 必须使用 NVIDIA 为 Jetson 提供的定制 wheel，
+# 不要用 pip install torch（PyPI 上没有 aarch64+CUDA 的 wheel）。
+# setup.sh 会自动处理；此处仅列出以供参考。
+#
+# torch             见 sh/setup.sh 中的 Jetson 源（本机为 2.8.0）
+# torchvision       见 sh/setup.sh 中的 Jetson 源（本机为 0.23.0）
+
+# ---- segment-anything 的依赖 ----
+numpy<2
+opencv-python-headless==4.10.0.84
+matplotlib
+pillow
+tqdm
+pycocotools
+
+# ---- segment-anything 包本体（从 GitHub 安装）----
+# git+https://github.com/facebookresearch/segment-anything.git
+
+# ---- 可选：TensorRT 加速（JetPack 自带，见 README 的「TensorRT 加速」章节）----
+# tensorrt
+# onnx
+# onnxruntime

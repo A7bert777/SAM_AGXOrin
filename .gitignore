@@ -1,0 +1,44 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── 虚拟环境 ────────────────────────────────────────────
+venv/
+venv310/
+.venv/
+env/
+
+# ── 模型权重与引擎（体积大；用 sh/download.sh 获取、sh/build_engine.sh 构建）──
+models/*.pth
+models/*.pt
+models/*.onnx
+models/*.engine
+*.pth
+*.engine
+
+# ── 运行时产物 ──────────────────────────────────────────
+# 服务运行时文件（socket / pid / 日志）
+run/*
+!run/.gitkeep
+
+# 日志
+logs/*.log
+logs/*.txt
+*.log
+
+# 可视化与掩码输出
+outputimage/*.png
+outputimage/*.jpg
+outputimage/*.jpeg
+outputs/*
+!outputs/.gitkeep
+
+# ── 编辑器 / 系统 ───────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
