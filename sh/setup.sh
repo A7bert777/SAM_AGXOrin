@@ -134,6 +134,8 @@ else
 
   # 4.3 用本地 wheel 离线安装 torch / torchvision 本体
   #     关键：必须用 --no-index，否则 pip 在同版本下会优先从索引重新下载（白下一遍）！
+  #     注意：此处用 --no-deps，torch 的依赖（typing-extensions 等）在 4.4 才安装，
+  #           所以这里只校验 pip 退出码，不能校验 `import torch`（此时依赖尚不完整）。
   echo "      离线安装本地 wheel（--no-index，不再联网重下）..."
   set +e
   "$PY" -m pip install --no-cache-dir --no-index --find-links "$WHEELS" \
@@ -142,7 +144,7 @@ else
     2>&1 | tee "$LOG/torch_install.log"
   pip_rc=${PIPESTATUS[0]}
   set -e
-  if [ "$pip_rc" -ne 0 ] || ! "$PY" -c "import torch" >/dev/null 2>&1; then
+  if [ "$pip_rc" -ne 0 ]; then
     echo "      [错误] 本地 wheel 安装失败，日志：logs/torch_install.log"
     tail -20 "$LOG/torch_install.log"
     exit 1
