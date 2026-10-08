@@ -12,6 +12,12 @@ venv310/
 .venv/
 env/
 
+# ── wheel 缓存（体积大；由 py/fetch_wheels.py 下载）──────────────────────
+wheels/*
+!wheels/.gitkeep
+*.whl
+*.part
+
 # ── 模型权重与引擎（体积大；用 sh/download.sh 获取、sh/build_engine.sh 构建）──
 models/*.pth
 models/*.pt
@@ -28,6 +34,8 @@ run/*
 # 日志
 logs/*.log
 logs/*.txt
+logs/*.json
+logs/pp/
 *.log
 
 # 可视化与掩码输出

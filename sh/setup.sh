@@ -8,9 +8,14 @@
 #   4. 安装 NVIDIA 定制 PyTorch + torchvision（Jetson 专用 wheel）
 #   5. 安装 segment-anything 及其依赖
 #   6. 检查可选的 TensorRT 组件
+#   7. 下载 SAM 权重（默认 ViT-B）
 #
 # 用法：./sh/setup.sh
 # 说明：若已有可用的 venv310（内含 torch），本脚本会直接复用，不会重新下载 PyTorch。
+#       权重选择（可选）：
+#         SAM_WEIGHTS=sam_vit_h ./sh/setup.sh   # 下载 ViT-H（2.4GB）
+#         SAM_WEIGHTS=all       ./sh/setup.sh   # 下载全部权重
+#         SAM_SKIP_WEIGHTS=1    ./sh/setup.sh   # 跳过权重下载
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,7 +40,7 @@ echo " torch: $TORCH_VERSION  /  torchvision: $TORCHVISION_VERSION"
 echo "=============================================="
 
 # ---------- 1. 环境自检 ----------
-echo "[1/6] 环境自检 ..."
+echo "[1/7] 环境自检 ..."
 if [ ! -f /etc/nv_tegra_release ]; then
   echo "  [警告] 未检测到 /etc/nv_tegra_release，当前可能不是 Jetson 设备"
 fi
@@ -56,9 +61,9 @@ echo "  可用磁盘    : ${AVAIL_GB}GB"
 
 # ---------- 2. venv ----------
 if [ -x "$PY" ]; then
-  echo "[2/6] 复用已有 venv: $VENV"
+  echo "[2/7] 复用已有 venv: $VENV"
 else
-  echo "[2/6] 创建 venv310 ..."
+  echo "[2/7] 创建 venv310 ..."
   if python3.10 -m venv "$VENV" 2>/dev/null; then
     echo "      虚拟环境已创建"
   else
@@ -71,7 +76,7 @@ fi
 export LD_LIBRARY_PATH="$SP/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
 
 # ---------- 3. pip ----------
-echo "[3/6] 检查 pip ..."
+echo "[3/7] 检查 pip ..."
 if ! "$PY" -m pip --version >/dev/null 2>&1; then
   echo "      venv 内缺少 pip，正在引导安装 ..."
   if [ -f "$ROOT/get-pip.py" ]; then
@@ -85,14 +90,79 @@ echo "      pip : $("$PY" -m pip --version)"
 "$PY" -m pip install --upgrade --no-cache-dir pip setuptools wheel >/dev/null
 
 # ---------- 4. torch / torchvision ----------
-echo "[4/6] 安装 PyTorch ${TORCH_VERSION} + torchvision ${TORCHVISION_VERSION} ..."
+echo "[4/7] 安装 PyTorch ${TORCH_VERSION} + torchvision ${TORCHVISION_VERSION} ..."
 if "$PY" -c "import torch" >/dev/null 2>&1; then
   echo "      torch 已就绪: $("$PY" -c 'import torch; print(torch.__version__)')，跳过"
 else
   echo "      源: $JETSON_PYPI_INDEX（约 1GB，请耐心等待）"
-  "$PY" -m pip install --no-cache-dir --index-url "$JETSON_PYPI_INDEX" \
+
+  # 4.0 确保 tqdm 可用（下载器的实时进度条）
+  if ! "$PY" -c "import tqdm" >/dev/null 2>&1; then
+    echo "      安装 tqdm（用于实时下载进度条）..."
+    "$PY" -m pip install --no-cache-dir tqdm >/dev/null 2>&1 \
+      || echo "      [警告] tqdm 安装失败，将使用内置进度条"
+  fi
+
+  # 4.1 用带 tqdm 进度条的下载器抓取 wheel 到本地 wheels/
+  #     （断点续传 + sha256 校验；重复运行会自动跳过已完成的文件）
+  WHEELS="$ROOT/wheels"
+  mkdir -p "$WHEELS"
+  echo "      下载 wheel（tqdm 进度条，支持断点续传）..."
+  "$PY" "$ROOT/py/fetch_wheels.py" \
+    --index-url "$JETSON_PYPI_INDEX" --dest "$WHEELS" \
     "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
-    > "$LOG/torch_install.log" 2>&1 || { tail -20 "$LOG/torch_install.log"; exit 1; }
+    || { echo "      [错误] wheel 下载失败，请重试（会从断点续传）"; exit 1; }
+
+  # 4.2 磁盘空间预检（torch 解压约需 2GB+）
+  AVAIL_KB=$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')
+  AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+  if [ "$AVAIL_GB" -lt 4 ] && [ "${SAM_SKIP_DISK_CHECK:-0}" != "1" ]; then
+    echo "      [提示] 磁盘仅剩 ${AVAIL_GB}GB，先清理 pip 缓存 ..."
+    "$PY" -m pip cache purge >/dev/null 2>&1 || true
+    find "$WHEELS" -name '*.part' -delete 2>/dev/null || true
+    AVAIL_KB=$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')
+    AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+  fi
+  if [ "$AVAIL_GB" -lt 4 ] && [ "${SAM_SKIP_DISK_CHECK:-0}" != "1" ]; then
+    echo "      [错误] 磁盘可用空间不足（仅 ${AVAIL_GB}GB，安装 torch 需 ≥4GB）。"
+    echo "             请先释放空间后重试，例如："
+    echo "               du -sh /home/*/.cache/* 2>/dev/null | sort -h | tail"
+    echo "               sudo apt clean; pip cache purge; rm -rf ~/.cache/pip"
+    echo "             如确认空间足够，可跳过本检查：SAM_SKIP_DISK_CHECK=1 ./sh/setup.sh"
+    exit 1
+  fi
+
+  # 4.3 用本地 wheel 离线安装 torch / torchvision 本体
+  #     关键：必须用 --no-index，否则 pip 在同版本下会优先从索引重新下载（白下一遍）！
+  echo "      离线安装本地 wheel（--no-index，不再联网重下）..."
+  set +e
+  "$PY" -m pip install --no-cache-dir --no-index --find-links "$WHEELS" \
+    --no-deps --progress-bar on \
+    "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+    2>&1 | tee "$LOG/torch_install.log"
+  pip_rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$pip_rc" -ne 0 ] || ! "$PY" -c "import torch" >/dev/null 2>&1; then
+    echo "      [错误] 本地 wheel 安装失败，日志：logs/torch_install.log"
+    tail -20 "$LOG/torch_install.log"
+    exit 1
+  fi
+
+  # 4.4 安装 torch / torchvision 的依赖（体积小，从默认 PyPI 获取）
+  #     此时 torch 本体已装好，pip 不会再下载大 wheel
+  echo "      安装运行依赖（体积小，pip 进度条已开启）..."
+  set +e
+  "$PY" -m pip install --no-cache-dir --progress-bar on \
+    filelock "typing-extensions>=4.10.0" "sympy>=1.13.3" \
+    "networkx>=2.5.1" jinja2 "fsspec>=0.8.5" "numpy<2" pillow \
+    2>&1 | tee -a "$LOG/torch_install.log"
+  dep_rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$dep_rc" -ne 0 ]; then
+    echo "      [错误] 依赖安装失败，日志：logs/torch_install.log"
+    tail -20 "$LOG/torch_install.log"
+    exit 1
+  fi
 fi
 
 # 验证 CUDA
@@ -116,24 +186,41 @@ else:
 PYEOF
 
 # ---------- 5. segment-anything 及依赖 ----------
-echo "[5/6] 安装 segment-anything 及其依赖 ..."
+echo "[5/7] 安装 segment-anything 及其依赖 ..."
 # 关键: numpy 必须 < 2（NVIDIA 定制 torch 按 numpy 1.x 编译）
-"$PY" -m pip install --no-cache-dir \
+# 实时显示进度并同时写日志（依赖体积较小）
+set +e
+"$PY" -m pip install --no-cache-dir --progress-bar on \
   "numpy<2" "opencv-python-headless==4.10.0.84" \
   matplotlib pillow tqdm pycocotools \
-  > "$LOG/deps.log" 2>&1 || { tail -20 "$LOG/deps.log"; exit 1; }
+  2>&1 | tee "$LOG/deps.log"
+dep_rc=${PIPESTATUS[0]}
+set -e
+if [ "$dep_rc" -ne 0 ]; then
+  echo "      [错误] 依赖安装失败，日志：logs/deps.log"
+  tail -20 "$LOG/deps.log"
+  exit 1
+fi
 echo "      依赖安装完成（日志：logs/deps.log）"
 
 if "$PY" -c "import segment_anything" >/dev/null 2>&1; then
   echo "      segment-anything 已安装，跳过"
 else
-  "$PY" -m pip install --no-cache-dir \
+  set +e
+  "$PY" -m pip install --no-cache-dir --progress-bar on \
     "git+https://github.com/facebookresearch/segment-anything.git" \
-    > "$LOG/sam_install.log" 2>&1 || { tail -20 "$LOG/sam_install.log"; exit 1; }
+    2>&1 | tee "$LOG/sam_install.log"
+  sam_rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$sam_rc" -ne 0 ]; then
+    echo "      [错误] segment-anything 安装失败，日志：logs/sam_install.log"
+    tail -20 "$LOG/sam_install.log"
+    exit 1
+  fi
 fi
 
 # ---------- 6. 可选加速组件 ----------
-echo "[6/6] 检查可选加速组件 ..."
+echo "[6/7] 检查可选加速组件 ..."
 for pkg in tensorrt onnx onnxruntime; do
   if "$PY" -c "import ${pkg//-/_}" >/dev/null 2>&1; then
     echo "      ${pkg}: 已安装"
@@ -142,6 +229,62 @@ for pkg in tensorrt onnx onnxruntime; do
   fi
 done
 
+# ---------- 7. SAM 权重 ----------
+echo "[7/7] 下载 SAM 权重 ..."
+# 通过环境变量选择权重（默认 ViT-B）：sam_vit_b / sam_vit_l / sam_vit_h / all
+# 设置 SAM_SKIP_WEIGHTS=1 可跳过本步骤
+declare -A SAM_FILES=(
+  [sam_vit_b]="sam_vit_b_01ec64.pth|https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+  [sam_vit_l]="sam_vit_l_0b3195.pth|https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth"
+  [sam_vit_h]="sam_vit_h_4b8939.pth|https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
+)
+MODELS_DIR="$ROOT/models"
+mkdir -p "$MODELS_DIR"
+
+download_weight() {
+  local key="$1"
+  local entry="${SAM_FILES[$key]:-}"
+  if [ -z "$entry" ]; then
+    echo "      [错误] 未知权重: $key (可选: sam_vit_b / sam_vit_l / sam_vit_h / all)"
+    return 1
+  fi
+  local fname url dest
+  fname="${entry%%|*}"
+  url="${entry#*|}"
+  dest="$MODELS_DIR/$fname"
+
+  if [ -f "$dest" ]; then
+    echo "      [跳过] $fname 已存在 ($(du -h "$dest" | cut -f1))"
+    return 0
+  fi
+
+  echo "      下载 $key -> $dest"
+  # -C -：断点续传；--retry：失败自动重试；进度条由 curl 实时显示
+  if ! curl -L --fail --retry 5 --retry-delay 3 -C - -o "$dest" "$url"; then
+    echo "      [错误] 下载失败: $url"
+    return 1
+  fi
+  echo "      [完成] $fname ($(du -h "$dest" | cut -f1))"
+  return 0
+}
+
+if [ "${SAM_SKIP_WEIGHTS:-0}" = "1" ]; then
+  echo "      SAM_SKIP_WEIGHTS=1，跳过权重下载"
+else
+  SAM_WEIGHTS_TARGET="${SAM_WEIGHTS:-sam_vit_b}"
+  echo "      目标: $SAM_WEIGHTS_TARGET（可用 SAM_WEIGHTS 选择: sam_vit_b / sam_vit_l / sam_vit_h / all）"
+  if [ "$SAM_WEIGHTS_TARGET" = "all" ]; then
+    for k in sam_vit_b sam_vit_l sam_vit_h; do
+      download_weight "$k" || true
+      echo ""
+    done
+  else
+    download_weight "$SAM_WEIGHTS_TARGET" || true
+  fi
+  echo "      当前已下载的权重:"
+  ls -lh "$MODELS_DIR"/*.pth 2>/dev/null | awk '{printf "        %-40s %s\n", $9, $5}' || echo "        (无)"
+fi
+
 # ---------- 自检 ----------
 echo
 echo "[自检] 运行 environment selfcheck ..."
@@ -149,10 +292,12 @@ echo "[自检] 运行 environment selfcheck ..."
 
 echo
 echo "=============================================="
-echo " 完成！下一步："
-echo "   ./sh/download.sh                 # 下载 ViT-B（375MB，推荐先用）"
-echo "   ./sh/download.sh sam_vit_h        # 或下载 ViT-H（2.4GB，精度最高）"
+echo " 完成！环境与权重均已就绪。"
 echo
-echo " 然后运行推理："
+echo " 如需下载其它权重："
+echo "   ./sh/download.sh sam_vit_l        # ViT-L（1.2GB）"
+echo "   ./sh/download.sh sam_vit_h        # ViT-H（2.4GB，精度最高）"
+echo
+echo " 运行推理："
 echo "   ./sh/run.sh --image inputimage/0000.jpg --point 500 400 --out outputimage/0000_point.png"
 echo "=============================================="
