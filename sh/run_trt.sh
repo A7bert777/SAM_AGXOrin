@@ -24,6 +24,16 @@ fi
 # TensorRT 运行库（Python 绑定在 venv 或系统，均可能需要系统库路径）
 export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu:$SP/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
-export NVIDIA_TF32_OVERRIDE="${NVIDIA_TF32_OVERRIDE:-1}"
+# 注意：不要设置 NVIDIA_TF32_OVERRIDE。TensorRT 要求「构建 engine」与「执行 engine」
+# 时该环境变量一致，否则报:
+#   [E] ICudaEngine::createExecutionContext ... Inconsistent setting of
+#       NVIDIA_TF32_OVERRIDE env var at build -1 and at execution 1
+# build_engine.sh 未设置（即默认 -1），故此处也必须保持不设置。
+# 如需 TF32 控制，用 py 里的 --no-tf32，或构建/推理同时显式设同一值。
+if [ -n "${NVIDIA_TF32_OVERRIDE:-}" ]; then
+  echo "[提示] 检测到 NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE}，"
+  echo "       请确保构建 engine 时使用相同的值，否则 TensorRT 会拒绝加载。"
+fi
+unset NVIDIA_TF32_OVERRIDE
 
 exec "$VENV/bin/python" "$ROOT/py/sam_trt_infer.py" "$@"

@@ -53,6 +53,10 @@ def build_predictor_with_trt_encoder(sam, engine):
     class TRTEncoderWrapper(torch.nn.Module):
         """伪装成 SAM 的 image_encoder，输出同样的 embedding。"""
 
+        # SamPredictor.set_image() 会读取 self.model.image_encoder.img_size，
+        # 被替换成 TRT 包装类后必须补上该属性，否则报 AttributeError。
+        img_size = 1024
+
         def __init__(self, eng):
             super().__init__()
             self.eng = eng
@@ -98,6 +102,7 @@ def parse_args(argv=None):
                    help="框提示 xyxy")
     p.add_argument("--out", default=None, help="输出可视化图像")
     p.add_argument("--mask-dir", default=None, help="导出每个掩码 PNG 到此目录")
+    p.add_argument("--max-masks", type=int, default=20, help="最多可视化前 N 个（供 S.report 使用）")
     p.add_argument("--bench", action="store_true", help="对比 PyTorch 与 TensorRT 编码器耗时")
     p.add_argument("--repeat", type=int, default=5, help="基准重复次数")
     p.add_argument("--device", default="cuda", help="cuda / cpu")

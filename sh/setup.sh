@@ -250,14 +250,48 @@ if ! "$PY" -c "import numpy; raise SystemExit(0 if numpy.__version__.split('.')[
   "$PY" -m pip install --no-cache-dir "numpy<2" >/dev/null 2>&1 || true
 fi
 
-# 可选：tensorrt（JetPack 自带）、onnxruntime（CPU 校验用）
-for pkg in tensorrt onnxruntime; do
-  if "$PY" -c "import ${pkg//-/_}" >/dev/null 2>&1; then
-    echo "      ${pkg}: 已安装"
-  else
-    echo "      ${pkg}: 未安装（可选）"
+# 6.x 安装 TensorRT 的 Python 绑定（run_trt.sh 推理需要 import tensorrt）
+#      trtexec 命令行工具由 JetPack 提供（/usr/src/tensorrt/bin/trtexec），
+#      但 Python 绑定默认不在 venv 里，需从项目自带的 deb 包安装。
+if "$PY" -c "import tensorrt" >/dev/null 2>&1; then
+  echo "      tensorrt: 已安装 ($("$PY" -c 'import tensorrt; print(tensorrt.__version__)'))"
+else
+  echo "      安装 TensorRT Python 绑定 ..."
+  TRT_PY_DIR="$ROOT/trt_py"
+  TRT_EXTRACT="$TRT_PY_DIR/extract"
+  TRT_DP="$TRT_EXTRACT/usr/lib/python3.10/dist-packages"
+  # 优先用项目内已解包的模块；若不存在则尝试解包自带 deb 包
+  if [ ! -d "$TRT_DP/tensorrt" ] && ls "$TRT_PY_DIR"/python3-libnvinfer_*.deb >/dev/null 2>&1; then
+    echo "        解包 trt_py/*.deb ..."
+    mkdir -p "$TRT_EXTRACT"
+    for d in "$TRT_PY_DIR"/python3-libnvinfer_*.deb \
+             "$TRT_PY_DIR"/python3-libnvinfer-lean_*.deb \
+             "$TRT_PY_DIR"/python3-libnvinfer-dispatch_*.deb; do
+      [ -f "$d" ] && dpkg-deb -x "$d" "$TRT_EXTRACT" 2>/dev/null || true
+    done
   fi
-done
+  if [ -d "$TRT_DP/tensorrt" ]; then
+    cp -r "$TRT_DP"/tensorrt "$TRT_DP"/tensorrt-*.dist-info \
+          "$TRT_DP"/tensorrt_lean "$TRT_DP"/tensorrt_lean-*.dist-info \
+          "$TRT_DP"/tensorrt_dispatch "$TRT_DP"/tensorrt_dispatch-*.dist-info \
+          "$SP"/ 2>/dev/null || true
+    if "$PY" -c "import tensorrt" >/dev/null 2>&1; then
+      echo "      tensorrt: $("$PY" -c 'import tensorrt; print(tensorrt.__version__)')"
+    else
+      echo "      [警告] tensorrt 导入仍失败，TensorRT 推理（run_trt.sh）将不可用"
+    fi
+  else
+    echo "      [警告] 未找到 TensorRT Python 绑定（$TRT_DP），run_trt.sh 将不可用"
+    echo "             可从 JetPack 安装: sudo apt install python3-libnvinfer"
+  fi
+fi
+
+# 可选：onnxruntime（CPU 校验用）
+if "$PY" -c "import onnxruntime" >/dev/null 2>&1; then
+  echo "      onnxruntime: 已安装"
+else
+  echo "      onnxruntime: 未安装（可选）"
+fi
 
 # ---------- 7. SAM 权重 ----------
 echo "[7/7] 下载 SAM 权重 ..."
