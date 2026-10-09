@@ -28,7 +28,12 @@ fi
 export LD_LIBRARY_PATH="$SP/nvidia/cusparselt/lib:${LD_LIBRARY_PATH:-}"
 # Jetson 上避免碎片化；如显存紧张可改为 1
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
-# 允许 TF32 加速（Ampere 架构支持，对分割精度影响很小）
-export NVIDIA_TF32_OVERRIDE="${NVIDIA_TF32_OVERRIDE:-1}"
+
+# PyTorch 后端：客户端连 run/sam.sock（由 serve.sh start 启动），
+# 连不上则回退到 sam_infer.py 本地单次运行。
+export SAM_BACKEND="torch"
+# 注意：不要设 NVIDIA_TF32_OVERRIDE。若同一进程/环境里还要加载 TensorRT engine，
+# TensorRT 要求该值与构建时一致，否则拒绝创建 context。PyTorch 侧的 TF32 由
+# sam_infer.py 里的 torch.backends.*.allow_tf32 控制，无需此环境变量。
 
 exec "$VENV/bin/python" "$ROOT/py/sam_client.py" "$@"

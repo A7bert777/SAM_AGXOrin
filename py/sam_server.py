@@ -103,6 +103,15 @@ def build_predictor(args):
     """
     model_args = argparse.Namespace(
         model=args.model, ckpt=args.ckpt, device=args.device, no_tf32=args.no_tf32)
+    # 指定 --engine 但未显式 --model 时，先从 engine 文件名推断模型类型，
+    # 否则 resolve_model 会按本机已有权重自动选（如 vit_h），与 engine（如 vit_b）
+    # 不匹配——两者 embedding 形状相同不会报错，但分割结果会明显错误。
+    if getattr(args, "engine", None) and not args.model:
+        import sam_trt_infer as T
+        inferred = T.model_from_engine(args.engine)
+        if inferred:
+            model_args.model = inferred
+            print(f"[信息] 从 engine 文件名推断模型为 {inferred}")
     model_args.model = S.resolve_model(model_args)
     sam, device = S.build_model(model_args)
 
@@ -120,18 +129,38 @@ def build_predictor(args):
         print(engine.info())
         predictor = T.build_predictor_with_trt_encoder(sam, engine)
         print(f"[服务] 已启用 TensorRT 编码器：{engine_path.name}")
-        return predictor, device
+        return predictor, device, model_args.model
 
     predictor = S.build_predictor(sam)
-    return predictor, device
+    return predictor, device, model_args.model
 
 
 # ---------------------------------------------------------------------- #
 # 请求处理
 # ---------------------------------------------------------------------- #
+# 这些是「启动服务」时才有意义的参数；客户端若把它透传过来（例如
+# run_trt.sh 带了 --engine），推理阶段必须丢弃，否则 sam_infer.parse_args 会报错。
+_STARTUP_FLAGS = ("--engine", "--precision")
+
+
+def _strip_startup_flags(argv):
+    """移除推理阶段不接受的启动参数及其取值。"""
+    out, i = [], 0
+    while i < len(argv):
+        if argv[i] in _STARTUP_FLAGS:
+            i += 2                     # 跳过 flag 与其值
+            continue
+        if any(argv[i].startswith(f + "=") for f in _STARTUP_FLAGS):
+            i += 1                     # 跳过 --flag=value 形式
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
+
+
 def handle_infer(predictor, device, req, model=None) -> dict:
     """执行一次推理请求，把子函数打印的内容收集到返回值里。"""
-    argv = list(req.get("argv") or [])
+    argv = _strip_startup_flags(list(req.get("argv") or []))
     if not argv:
         return {"ok": False, "error": "缺少 argv（应形如 ['--image','a.jpg','--point','1','2']）"}
 
@@ -235,7 +264,7 @@ def main(argv=None):
     args = parse_args(argv)
     sock_path = Path(args.socket).resolve()
 
-    predictor, device = build_predictor(args)
+    predictor, device, model = build_predictor(args)
 
     if args.warmup:
         # 用项目自带图预热一次，排除首帧 CUDA 内核初始化开销
@@ -251,11 +280,8 @@ def main(argv=None):
             except Exception as e:                # noqa: BLE001 预热失败不影响服务
                 print(f"[服务] 预热跳过：{e}")
 
-    # 把服务实际加载的模型名传下去（供日志/展示使用）
-    model_args = argparse.Namespace(
-        model=args.model, ckpt=args.ckpt, device=args.device, no_tf32=args.no_tf32)
-    model_args.model = S.resolve_model(model_args)
-    serve_forever(predictor, device, sock_path, args.idle_timeout, model_args.model)
+    # 把服务实际加载的模型名传下去（供日志/展示与请求注入使用）
+    serve_forever(predictor, device, sock_path, args.idle_timeout, model)
     return 0
 
 

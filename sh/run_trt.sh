@@ -4,11 +4,16 @@
 # 用法（与 run.sh 提示参数基本一致，需已构建 engine）：
 #   ./sh/run_trt.sh --image inputimage/0000.jpg --point 500 400 --out outputimage/0000_trt_point.png
 #   ./sh/run_trt.sh --image inputimage/0000.jpg --box 100 100 800 600 --out outputimage/0000_trt_box.png
-#   ./sh/run_trt.sh --image inputimage/0000.jpg --point 500 400 --bench
+#   ./sh/run_trt.sh --image inputimage/0000.jpg --point 500 400 --engine models/xxx_tf32.engine
+#
+# 行为（与 run.sh 对称，TensorRT 后端）：
+#   若已执行 ./sh/serve.sh start --engine <engine>（TRT 常驻服务在线）
+#       -> 请求转发给服务，约 0.3s 返回
+#   否则 -> 本地单次运行（每次重新加载权重 + engine，约 10s+）
 #
 # 前提：已导出 ONNX 并构建 engine：
 #   ./venv310/bin/python py/export_onnx.py --model vit_h
-#   ./sh/build_engine.sh models/sam_vit_h_encoder.onnx
+#   ./sh/build_engine.sh models/sam_vit_h_encoder.onnx tf32
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,4 +41,8 @@ if [ -n "${NVIDIA_TF32_OVERRIDE:-}" ]; then
 fi
 unset NVIDIA_TF32_OVERRIDE
 
-exec "$VENV/bin/python" "$ROOT/py/sam_trt_infer.py" "$@"
+# TensorRT 后端：客户端会优先连 run/sam_trt.sock（由 serve.sh start --engine 启动），
+# 连不上则回退到 sam_trt_infer.py 本地单次运行。
+export SAM_BACKEND="trt"
+
+exec "$VENV/bin/python" "$ROOT/py/sam_client.py" "$@"

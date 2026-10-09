@@ -42,6 +42,20 @@ from trt_runner import TRTEngine
 ENGINE_PRECISIONS = ("tf32", "fp16", "fp32")
 
 
+def model_from_engine(engine_path):
+    """从 engine 文件名 ``sam_<model>_encoder_<precision>.engine`` 推断模型类型。
+
+    指定 ``--engine`` 但未指定 ``--model`` 时必须用它推断，否则
+    ``resolve_model`` 会按「本机已有权重」自动选（例如 vit_h），与 engine
+    （例如 vit_b）不匹配——两者 embedding 形状相同、不会报错，但结果错误。
+    """
+    name = Path(engine_path).name
+    for m in S.CKPT_MAP:
+        if f"sam_{m}_encoder" in name:
+            return m
+    return None
+
+
 def default_engine(model: str, precision: str | None = None) -> Path:
     """给出 engine 路径。
 
@@ -136,6 +150,13 @@ def main(argv=None):
     if args.point is None and args.box is None:
         sys.exit("[错误] 必须提供 --point 或 --box")
 
+    # 指定 --engine 且未显式 --model 时，先从 engine 文件名推断模型，
+    # 避免 resolve_model 自动选用本机权重（可能 vit_h）与 engine（可能 vit_b）不匹配。
+    if args.engine and not args.model:
+        inferred = model_from_engine(Path(args.engine))
+        if inferred:
+            args.model = inferred
+            print(f"[信息] 从 engine 文件名推断模型为 {inferred}")
     args.model = S.resolve_model(args)
     engine_path = Path(args.engine) if args.engine else default_engine(args.model, args.precision)
     if not engine_path.is_file():

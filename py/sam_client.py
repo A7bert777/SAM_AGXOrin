@@ -10,7 +10,15 @@
 
 这样「启动服务加速」是**可选优化**，不启动也不会出错。
 
+按后端隔离
+----------
+``sh/run.sh`` 与 ``sh/run_trt.sh`` 各连一个**独立的服务**，互不干扰：
+    - PyTorch  后端：``run/sam.sock``     （由 ``serve.sh start`` 启动）
+    - TensorRT 后端：``run/sam_trt.sock`` （由 ``serve.sh start --engine/--precision`` 启动）
+连不上时按 ``SAM_BACKEND`` 回退到对应的单次运行脚本。
+
 环境变量：
+    SAM_BACKEND   "torch"（默认）或 "trt"，决定 socket 与本地回退脚本
     SAM_SOCKET    自定义 socket 路径（需与服务端一致）
     SAM_NO_SERVER 设为 1 时，强制本地运行（绕过服务）
 """
@@ -27,9 +35,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "py"))
 
 
+def current_backend() -> str:
+    return os.environ.get("SAM_BACKEND", "torch")
+
+
 def socket_path() -> Path:
+    """按后端确定 socket 路径。
+
+    优先级：SAM_SOCKET > SAM_BACKEND（trt -> run/sam_trt.sock，其余 -> run/sam.sock）。
+    """
     env = os.environ.get("SAM_SOCKET")
-    return Path(env) if env else ROOT / "run" / "sam.sock"
+    if env:
+        return Path(env)
+    name = "sam_trt.sock" if current_backend() == "trt" else "sam.sock"
+    return ROOT / "run" / name
 
 
 def ask_server(argv, timeout=600.0):
@@ -81,8 +100,15 @@ def ask_server(argv, timeout=600.0):
 
 
 def fallback_local(argv) -> int:
-    """本地单次运行（等价于直接执行 sam_infer.py）。"""
-    print("[提示] 未检测到常驻服务，本地加载模型（约 6s）。"
+    """本地单次运行（按后端分派到 sam_infer 或 sam_trt_infer）。"""
+    if current_backend() == "trt":
+        print("[提示] 未检测到 TensorRT 常驻服务，本地单次运行"
+              "（每次都会重新加载权重 + engine，约 10s+）。\n"
+              "       如需加速可先执行："
+              "./sh/serve.sh start --engine <your.engine>", file=sys.stderr)
+        import sam_trt_infer as T
+        return T.main(list(argv))
+    print("[提示] 未检测到 PyTorch 常驻服务，本地加载模型（约 6s）。"
           "如需加速可先执行 ./sh/serve.sh start", file=sys.stderr)
     import sam_infer
     return sam_infer.main(list(argv))
